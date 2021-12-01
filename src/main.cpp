@@ -12,7 +12,10 @@
 #include <ActisenseReader.h>
 #include <NMEA2000_esp32.h>
 
-#include "ReactESP.h"
+#include <ReactESP.h>
+using namespace reactesp;
+
+ReactESP app;
 
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 64  // OLED display height, in pixels
@@ -49,7 +52,7 @@ void HandleStreamActisenseMsg(const tN2kMsg &message) {
   nmea2000->SendMsg(message);
 }
 
-ReactESP app([]() {
+void setup() {
   // setup serial output
   Serial.begin(115200);
   delay(100);
@@ -135,4 +138,8 @@ ReactESP app([]() {
     num_n2k_messages = 0;
     num_actisense_messages = 0;
   });
-});
+}
+
+void loop() {
+  app.tick();
+}
