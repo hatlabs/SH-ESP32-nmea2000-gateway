@@ -13,6 +13,8 @@
 #include <NMEA2000_esp32.h>
 
 #include <ReactESP.h>
+#include <esp_int_wdt.h>
+#include <esp_task_wdt.h>
 using namespace reactesp;
 
 ReactESP app;
@@ -50,6 +52,30 @@ void HandleStreamActisenseMsg(const tN2kMsg &message) {
   num_actisense_messages++;
   ToggleLed();
   nmea2000->SendMsg(message);
+}
+
+String can_state;
+
+void PollCANStatus() {
+  // CAN controller registers are SJA1000 compatible.
+  // Bus status value 0 indicates bus-on; value 1 indicates bus-off.
+  unsigned int bus_status = MODULE_CAN->SR.B.BS;
+
+  switch (bus_status) {
+    case 0:
+      can_state = "RUNNING";
+      break;
+    case 1:
+      can_state = "BUS-OFF";
+      // try to automatically recover by rebooting
+      app.onDelay(2000, []() {
+        esp_task_wdt_init(1, true);
+        esp_task_wdt_add(NULL);
+        while (true)
+          ;
+      });
+      break;
+  }
 }
 
 void setup() {
@@ -109,6 +135,9 @@ void setup() {
     actisense_reader.ParseMessages();
   });
 
+  // enable CAN status polling
+  app.onRepeat(100, []() { PollCANStatus(); });
+
   // initialize the display
   i2c = new TwoWire(0);
   i2c->begin(SDA_PIN, SCL_PIN);
@@ -129,6 +158,7 @@ void setup() {
     display->setCursor(0, 0);
     display->setTextColor(SSD1306_WHITE);
     display->printf("SH-ESP32 N2K USB GW\n");
+    display->printf("CAN: %s\n", can_state.c_str());
     display->printf("Uptime: %lu\n", millis() / 1000);
     display->printf("RX: %d\n", num_n2k_messages);
     display->printf("TX: %d\n", num_actisense_messages);
