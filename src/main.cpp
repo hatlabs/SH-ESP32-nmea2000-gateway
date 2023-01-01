@@ -5,14 +5,16 @@
 #define SDA_PIN 16
 #define SCL_PIN 17
 
-#include <Wire.h>
+#include <ActisenseReader.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <N2kMessages.h>
-#include <ActisenseReader.h>
 #include <NMEA2000_esp32.h>
-
 #include <ReactESP.h>
+#include <Wire.h>
+#include <esp_int_wdt.h>
+#include <esp_task_wdt.h>
+
 using namespace reactesp;
 
 ReactESP app;
@@ -20,16 +22,16 @@ ReactESP app;
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 64  // OLED display height, in pixels
 
-TwoWire* i2c;
+TwoWire *i2c;
 
-Stream *read_stream=&Serial;
-Stream *forward_stream=&Serial;
+Stream *read_stream = &Serial;
+Stream *forward_stream = &Serial;
 
 tActisenseReader actisense_reader;
 
-Adafruit_SSD1306* display;
+Adafruit_SSD1306 *display;
 
-tNMEA2000* nmea2000;
+tNMEA2000 *nmea2000;
 
 void ToggleLed() {
   static bool led_state = false;
@@ -52,6 +54,30 @@ void HandleStreamActisenseMsg(const tN2kMsg &message) {
   nmea2000->SendMsg(message);
 }
 
+String can_state;
+
+void PollCANStatus() {
+  // CAN controller registers are SJA1000 compatible.
+  // Bus status value 0 indicates bus-on; value 1 indicates bus-off.
+  unsigned int bus_status = MODULE_CAN->SR.B.BS;
+
+  switch (bus_status) {
+    case 0:
+      can_state = "RUNNING";
+      break;
+    case 1:
+      can_state = "BUS-OFF";
+      // try to automatically recover by rebooting
+      app.onDelay(2000, []() {
+        esp_task_wdt_init(1, true);
+        esp_task_wdt_add(NULL);
+        while (true)
+          ;
+      });
+      break;
+  }
+}
+
 void setup() {
   // setup serial output
   Serial.begin(115200);
@@ -59,9 +85,7 @@ void setup() {
 
   // toggle the LED pin at rate of 1 Hz
   pinMode(LED_BUILTIN, OUTPUT);
-  app.onRepeatMicros(1e6 / 1, []() {
-    ToggleLed();
-  });
+  app.onRepeatMicros(1e6 / 1, []() { ToggleLed(); });
 
   // instantiate the NMEA2000 object
   nmea2000 = new tNMEA2000_esp32(CAN_TX_PIN, CAN_RX_PIN);
@@ -75,11 +99,12 @@ void setup() {
 
   // Set Product information
   nmea2000->SetProductInformation(
-      "20210331",                      // Manufacturer's Model serial code (max 32 chars)
-      103,                             // Manufacturer's product code
-      "SH-ESP32 NMEA 2000 USB GW",     // Manufacturer's Model ID (max 33 chars)
-      "0.1.0.0 (2021-03-31)",          // Manufacturer's Software version code (max 40 chars)
-      "0.0.3.1 (2021-03-07)"           // Manufacturer's Model version (max 24 chars)
+      "20210331",  // Manufacturer's Model serial code (max 32 chars)
+      103,         // Manufacturer's product code
+      "SH-ESP32 NMEA 2000 USB GW",  // Manufacturer's Model ID (max 33 chars)
+      "0.1.0.0 (2021-03-31)",  // Manufacturer's Software version code (max 40
+                               // chars)
+      "0.0.3.1 (2021-03-07)"   // Manufacturer's Model version (max 24 chars)
   );
   // Set device information
   nmea2000->SetDeviceInformation(
@@ -92,22 +117,26 @@ void setup() {
             // http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
   );
 
-  nmea2000->SetForwardStream(forward_stream); 
+  nmea2000->SetForwardStream(forward_stream);
   nmea2000->SetMode(tNMEA2000::N2km_ListenAndNode);
-  // nmea2000->SetForwardType(tNMEA2000::fwdt_Text); // Show bus data in clear text
-  nmea2000->SetForwardOwnMessages(false); // do not echo own messages.
+  // nmea2000->SetForwardType(tNMEA2000::fwdt_Text); // Show bus data in clear
+  // text
+  nmea2000->SetForwardOwnMessages(false);  // do not echo own messages.
   nmea2000->SetMsgHandler(HandleStreamN2kMsg);
   nmea2000->Open();
 
   actisense_reader.SetReadStream(read_stream);
   actisense_reader.SetDefaultSource(75);
-  actisense_reader.SetMsgHandler(HandleStreamActisenseMsg); 
+  actisense_reader.SetMsgHandler(HandleStreamActisenseMsg);
 
   // No need to parse the messages at every single loop iteration; 1 ms will do
-  app.onRepeat(1, []() { 
+  app.onRepeat(1, []() {
     nmea2000->ParseMessages();
     actisense_reader.ParseMessages();
   });
+
+  // enable CAN status polling
+  app.onRepeat(100, []() { PollCANStatus(); });
 
   // initialize the display
   i2c = new TwoWire(0);
@@ -129,10 +158,11 @@ void setup() {
     display->setCursor(0, 0);
     display->setTextColor(SSD1306_WHITE);
     display->printf("SH-ESP32 N2K USB GW\n");
+    display->printf("CAN: %s\n", can_state.c_str());
     display->printf("Uptime: %lu\n", millis() / 1000);
     display->printf("RX: %d\n", num_n2k_messages);
     display->printf("TX: %d\n", num_actisense_messages);
-    
+
     display->display();
 
     num_n2k_messages = 0;
@@ -140,6 +170,4 @@ void setup() {
   });
 }
 
-void loop() {
-  app.tick();
-}
+void loop() { app.tick(); }
