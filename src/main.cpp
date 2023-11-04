@@ -15,12 +15,16 @@
 #include <esp_int_wdt.h>
 #include <esp_task_wdt.h>
 
+#include "elapsedMillis.h"
+
 using namespace reactesp;
 
 ReactESP app;
 
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 64  // OLED display height, in pixels
+
+#define RECOVERY_RETRY_MS 1000  // How long to attempt CAN bus recovery
 
 TwoWire *i2c;
 
@@ -33,20 +37,26 @@ Adafruit_SSD1306 *display;
 
 tNMEA2000 *nmea2000;
 
+int num_n2k_messages = 0;
+int num_actisense_messages = 0;
+elapsedMillis time_since_last_can_rx = 0;
+
+// Time after which we should reboot if we haven't received any CAN messages
+#define MAX_RX_WAIT_TIME_MS 30000
+
 void ToggleLed() {
   static bool led_state = false;
   digitalWrite(LED_BUILTIN, led_state);
   led_state = !led_state;
 }
 
-int num_n2k_messages = 0;
 void HandleStreamN2kMsg(const tN2kMsg &message) {
   // N2kMsg.Print(&Serial);
   num_n2k_messages++;
+  time_since_last_can_rx = 0;
   ToggleLed();
 }
 
-int num_actisense_messages = 0;
 void HandleStreamActisenseMsg(const tN2kMsg &message) {
   // N2kMsg.Print(&Serial);
   num_actisense_messages++;
@@ -55,6 +65,29 @@ void HandleStreamActisenseMsg(const tN2kMsg &message) {
 }
 
 String can_state;
+
+void RecoverFromCANBusOff() {
+  // This recovery routine first discussed in
+  // https://www.esp32.com/viewtopic.php?t=5010 and also implemented in
+  // https://github.com/wellenvogel/esp32-nmea2000
+  static bool recovery_in_progress = false;
+  static elapsedMillis recovery_timer;
+  if (recovery_in_progress && recovery_timer < RECOVERY_RETRY_MS) {
+    return;
+  }
+  recovery_in_progress = true;
+  recovery_timer = 0;
+  // Abort transmission
+  MODULE_CAN->CMR.B.AT = 1;
+  // read SR after write to CMR to settle register changes
+  (void)MODULE_CAN->SR.U;
+
+  // Reset error counters
+  MODULE_CAN->TXERR.U = 127;
+  MODULE_CAN->RXERR.U = 0;
+  // Release Reset mode
+  MODULE_CAN->MOD.B.RM = 0;
+}
 
 void PollCANStatus() {
   // CAN controller registers are SJA1000 compatible.
@@ -67,13 +100,8 @@ void PollCANStatus() {
       break;
     case 1:
       can_state = "BUS-OFF";
-      // try to automatically recover by rebooting
-      app.onDelay(2000, []() {
-        esp_task_wdt_init(1, true);
-        esp_task_wdt_add(NULL);
-        while (true)
-          ;
-      });
+      // try to automatically recover
+      RecoverFromCANBusOff();
       break;
   }
 }
@@ -131,12 +159,21 @@ void setup() {
 
   // No need to parse the messages at every single loop iteration; 1 ms will do
   app.onRepeat(1, []() {
+    PollCANStatus();
     nmea2000->ParseMessages();
     actisense_reader.ParseMessages();
   });
 
-  // enable CAN status polling
-  app.onRepeat(100, []() { PollCANStatus(); });
+  app.onRepeat(100, []() {
+    if (time_since_last_can_rx > MAX_RX_WAIT_TIME_MS) {
+      // No CAN messages received in a while; reboot
+      esp_task_wdt_init(1, true);
+      esp_task_wdt_add(NULL);
+      while (true) {
+        // wait for watchdog to trigger
+      }
+    }
+  });
 
   // initialize the display
   i2c = new TwoWire(0);
